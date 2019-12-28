@@ -1,0 +1,991 @@
+<!doctype html>
+<html lang="en">
+
+	<head>
+		<meta charset="utf-8">
+
+		<title>这才是真正的Python Thread - Thread使用技巧及源码剖析</title>
+
+		<meta name="description" content="A framework for easily creating beautiful presentations using HTML">
+		<meta name="author" content="Hakim El Hattab">
+
+		<meta name="apple-mobile-web-app-capable" content="yes">
+		<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+
+		<meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+		<link rel="stylesheet" href="css/reset.css">
+		<link rel="stylesheet" href="css/reveal.css">
+		<link rel="stylesheet" href="css/theme/zane.css" id="theme">
+
+		<!-- Theme used for syntax highlighting of code -->
+		<link rel="stylesheet" href="lib/css/monokai.css">
+
+		<!-- Printing and PDF exports -->
+		<script>
+			var link = document.createElement( 'link' );
+			link.rel = 'stylesheet';
+			link.type = 'text/css';
+			link.href = window.location.search.match( /print-pdf/gi ) ? 'css/print/pdf.css' : 'css/print/paper.css';
+			document.getElementsByTagName( 'head' )[0].appendChild( link );
+		</script>
+
+		<!--[if lt IE 9]>
+		<script src="lib/js/html5shiv.js"></script>
+		<![endif]-->
+	</head>
+
+	<body>
+
+		<div class="reveal">
+
+			
+			<div class="slides">
+				<!-- page1 -->
+				<section>
+					<h1><b>这才是真正的Python Thread</b></h1>
+					<h2>Thread使用技巧及源码剖析</h2>
+					<div class="text-2xl">
+						
+						<span class="">
+								廖茂文（二两）
+								<span class="mx-2">·</span>
+								省省Python工程师
+								<span class="mx-2">·</span>
+								Web开发
+								<span class="mx-2">·</span>
+								@ayuLiao
+							</span>
+					</div>
+				</section>
+
+				<!-- page2 -->
+				<section>
+					<section>
+						<b class="text-5xl">公司的项目中使用了大量的Thread，你是否好奇过Thread底层实现？</b>
+					</section>
+					<section>
+						<div class="text-left w-8/12 mx-auto">
+							<div class="text-5xl"><b>Python中有3种线程的使用方式，分别是</b></div>
+							<div>thread（Python 3.x中已被重名为_thread）</div>
+							<div>threading</div>
+							<div>ThreadPoolExecutor</div>
+						</div>
+					</section>
+					<section>
+						<div class="text-5xl mb-4"><b>它们之间的关系</b></div>
+						<p>threading基于_thread构建，提供更完全的线程管理能力</p>
+						<p>ThreadPoolExector在threading进一步封装，使得线程的使用进一步简化</p>
+						<div class="fragment">人话：threading提供了线程所有操作</div>
+					</section>
+					<section>
+						<div><b>threading提供了很多功能</b></div>
+						<div>线程基本功能</div>
+						<div>可重入锁</div>
+						<div>条件锁</div>
+						<div>信号量</div>
+						<div>事件通知</div>
+						<div>栅栏对象</div>
+						<div>队列机制</div>
+						<div>ThreadLocal</div>
+						<div>以及最难搞的GIL</div>
+						<div class="fragment">如果你不去了解其本质，这些功能有时会显得十分混乱</div>
+					</section>
+				</section>
+
+				<!-- page3 -->
+				<section>
+					<section>
+						<h2><b>小调查</b></h2>
+						<p class="fragment fade-in-then-semi-out">了解Python Thread各种同步机制之间的关系吗？</p>
+						<p class="fragment fade-in-then-semi-out">了解ThreadLocal的实现原理吗？听说过Werkzeug以同样的机制实现了一套更完善的ThreadLocal吗？</p>
+						<p class="fragment fade-in-then-semi-out">理解Python Thread以及GIL的实现原理吗？</p>
+						<p class="fragment">SHOW ME THE CODE!</p>
+					</section>
+				</section>
+
+				<!-- page4 -->
+				<section>
+					<section><h2>线程同步机制之间的关系</h2></section>
+					<section>
+						<p>Python Thread中最基本的锁使用</p>
+						<pre><code data-trim data-noescape class="python text-3xl leading-normal">
+							import time
+							import threading
+
+							class MyThread(threading.Thread):
+								def __init__(self, input, output, lock):
+									super(MyThread, self).__init__()
+									self.input = input
+									self.output = output
+									self.lock = lock # 传入的lock对象
+
+								def run(self):
+									self.lock.acquire() # 获得lock对象，lock状态变为locked，并且阻塞其他线程获取lock对象
+									for line in self.input.readlines():
+										time.sleep(1) # 模拟耗时操作
+										self.output.write(line)
+									self.lock.release() # 释放lock对象
+									print('Thread Done')
+
+							def main():
+								lock = threading.Lock() # 创建lock对象
+								txt1 = open('1.txt', 'r')
+								txt2 = open('2.txt', 'r')
+								txt3 = open('3.txt', 'a')
+								t1 = MyThread(txt1, txt3, lock)
+								t2 = MyThread(txt2, txt3, lock)
+								t1.start()
+								t2.start()
+								print('Done')
+
+							main()
+						</code></pre>
+					</section>
+					<section>
+						<h4><b>简化一下</b></h4>
+						<pre><code data-trim data-noescape class="python text-3xl leading-normal">
+							def run(self):
+								with self.lock: # 锁会自动获取与释放
+									for line in self.input.readlines():
+										time.sleep(1) # 模拟耗时操作
+										self.output.write(line)
+								print('Thread Done')
+						</code></pre>
+					</section>
+				</section>
+
+				<!-- page5 -->
+				<section>
+					<section><h2>Python内部是怎么实现锁Lock的？</h2></section>
+					<section>
+						<p>在Lib/threading.py中可以看到如下代码</p>
+						<pre><code data-trim data-noescape class="cpp text-3xl leading-normal">
+							# Lib/threading.py
+
+							# Synchronization classes
+							Lock = _allocate_lock
+							_allocate_lock = _thread.allocate_lock
+						</code></pre>
+					</section>
+					<section>
+						<p>通过_threadmodule.c的thread_methods可知allocate_lock映射到了thread_PyThread_allocate_lock()方法</p>
+						<pre><code data-trim data-noescape class="cpp text-3xl leading-normal">
+							static PyMethodDef thread_methods[] = {
+							...
+							{"allocate_lock",           thread_PyThread_allocate_lock,
+								METH_NOARGS, allocate_doc},
+							{"allocate",                thread_PyThread_allocate_lock,
+								METH_NOARGS, allocate_doc},
+								...
+						</code></pre>
+					</section>
+					<section>
+						<p>thread_PyThread_allocate_lock()方法代码如下</p>
+						<pre><code data-trim data-noescape class="cpp text-3xl leading-normal">
+							static PyObject *
+							thread_PyThread_allocate_lock(PyObject *self, PyObject *Py_UNUSED(ignored))
+							{
+								return (PyObject *) newlockobject(); // 创建新的锁对象
+							}
+						</code></pre>
+					</section>
+					<section>
+						<p>thread_PyThread_allocate_lock()方法本质就调用了newlockobject()方法获得新的锁对象，该方法代码如下。</p>
+						<pre><code data-trim data-noescape class="cpp text-3xl leading-normal">
+							static lockobject *
+							newlockobject(void)
+							{
+								lockobject *self;
+								// 更加锁类型创建锁对象
+								self = PyObject_New(lockobject, &Locktype);
+								if (self == NULL)
+									return NULL;
+								// 分配锁对象
+								self->lock_lock = PyThread_allocate_lock(); 
+								self->locked = 0;
+								self->in_weakreflist = NULL;
+								if (self->lock_lock == NULL) {
+									Py_DECREF(self);
+									PyErr_SetString(ThreadError, "can't allocate lock");
+									return NULL;
+								}
+								return self;
+							}
+						</code></pre>
+					</section>
+					<section>
+						<p class="fragment fade-in-then-semi-out">最终的关键就是PyThread_allocate_lock()方法</p>
+						<p class="fragment fade-in-then-semi-out">这个方法有两种不同的实现方式</p>
+						<p class="fragment fade-in-then-semi-out">通过USE_SEMAPHORES常量来判断，如果USE_SEMAPHORES存在，则基于信号量机制来实现锁，如果USE_SEMAPHORES不存在，则通过互斥量与条件变量来实现锁。</p>
+						<pre class="fragment fade-in-then-semi-out"><code data-trim data-noescape class="cpp text-3xl leading-normal">
+							// Python/thread_pthread.h
+
+							// 是否直接使用信号量，还是使用互斥量和条件变量模拟信号量
+							if (defined(_POSIX_SEMAPHORES) && !defined(HAVE_BROKEN_POSIX_SEMAPHORES) && \
+								defined(HAVE_SEM_TIMEDWAIT))
+							  define USE_SEMAPHORES
+							else
+							  undef USE_SEMAPHORES
+							endif
+						</code></pre>
+					</section>
+					
+					<section>
+						<p>分析基于信号量的实现。PyThread_allocate_lock()方法基于信号量的实现方式如下。</p>
+						<pre><code data-trim data-noescape class="cpp text-3xl leading-normal">
+							// Python/thread_pthread.h
+							// 创建锁对象
+							PyThread_type_lock
+							PyThread_allocate_lock(void)
+							{
+								// 以信号量作为锁
+								sem_t *lock;
+								int status, error = 0;
+
+								dprintf(("PyThread_allocate_lock called\n"));
+								if (!initialized)
+									PyThread_init_thread();
+								// 创建锁对象 - 基于信号量机制的锁对象
+								lock = (sem_t *)PyMem_RawMalloc(sizeof(sem_t));
+
+								if (lock) {
+									// 初始化锁所在地址的信号量，初始值为1
+									status = sem_init(lock,0,1);
+									CHECK_STATUS("sem_init");
+
+									if (error) {
+										// 失败，释放锁空间
+										PyMem_RawFree((void *)lock);
+										lock = NULL;
+									}
+								}
+
+								dprintf(("PyThread_allocate_lock() -> %p\n", (void *)lock));
+								// 返回锁对象
+								return (PyThread_type_lock)lock;
+							}
+						</code></pre>
+					</section>
+					<section>
+						<h2><b>总结一下</b></h2>
+						<p class="fragment fade-in-then-semi-out">Python中的锁就是基于操作系统信号量实现</p>
+						<p class="fragment fade-in-then-semi-out">使用PyMem_RawMalloc()方法来创建锁对象，并通过sem_init()方法来初始化锁所在地址的信号量，初始值为1</p>
+						<p class="fragment fade-in-then-semi-out">源自POSIX标准，CPython在windows中的源码并没有使用POSIX，而是基于Windows底层API</p>
+					</section>
+				</section>
+
+				<!-- page6 -->
+				<section>
+					<section><h2>Python中使用acquire()获取锁与release()释放锁时，底层发生了什么？</h2></section>
+					<section>
+						<p>先看acquire()，分析基于信号量的实现。</p>
+						<p>PyThread_allocate_lock()方法基于信号量的实现方式如下。</p>
+						<pre><code data-trim data-noescape class="cpp text-3xl leading-normal">
+							// Python/thread_pthread.h
+
+							// 获取锁对象
+							int
+							PyThread_acquire_lock(PyThread_type_lock lock, int waitflag)
+							{
+								return PyThread_acquire_lock_timed(lock, waitflag ? -1 : 0, /*intr_flag=*/0);
+							}
+
+							PyLockStatus
+							PyThread_acquire_lock_timed(PyThread_type_lock lock, PY_TIMEOUT_T microseconds,int intr_flag)
+							{
+								...
+								// 对信号量进行减1操作
+								if (microseconds > 0) {
+										status = fix_status(sem_timedwait(thelock, &ts));
+									}
+									else if (microseconds == 0) {
+										status = fix_status(sem_trywait(thelock));
+									}
+									else {
+										status = fix_status(sem_wait(thelock));
+									}
+								...
+							}
+						</code></pre>
+					</section>
+					<section>
+						<h2><b>关注关键的部分</b></h2>
+						<p class="fragment fade-in-then-semi-out">在Python中获取线程其实就是利用了sem_timedwait()、sem_trywait()或sem_wait()方法，这些方法都会对信号量减一</p>
+					</section>
+					<section>
+						<p>release()释放锁的具体逻辑如下</p>
+						<pre><code data-trim data-noescape class="cpp text-3xl leading-normal">
+							# Python/thread_pthread.h
+
+							// 释放锁对象
+							void
+							PyThread_release_lock(PyThread_type_lock lock)
+							{
+								sem_t *thelock = (sem_t *)lock;
+								int status, error = 0;
+
+								(void) error; /* silence unused-but-set-variable warning */
+								dprintf(("PyThread_release_lock(%p) called\n", lock));
+								// 对信号量进行加1操作
+								status = sem_post(thelock);
+								CHECK_STATUS("sem_post");
+							}
+						</code></pre>
+					</section>
+					<section data-background="img/wow.gif">
+						<div class="text-5xl mb-4">
+							<b >Python Lock原来如此！</b>
+						</div>
+					</section>
+				</section>
+
+				<!-- page7 -->
+				<section>
+					<section><h2>Python其他同步机制与普通锁之间存在什么关系？</h2></section>
+					<section>
+						<h2><b>跟你想的一样，都基于普通锁实现，而且实现源码很简单</b></h2>
+					</section>
+					<section>
+						<p class="fragment fade-in-then-semi-out">可重入锁基于普通锁实现，多了一个变量用来判断重复次数</p>
+						<p class="fragment fade-in-then-semi-out">条件锁默认使用可重复锁来实现，它会调用_release_save()直接清零可重复锁的计数</p>
+						<p class="fragment fade-in-then-semi-out">Python中的信号量基于条件锁来实现，多了一个self._value属性作为计数器</p>
+						<p class="fragment fade-in-then-semi-out">事件通知基于条件锁实现，多了一个self._flag作为事件标志</p>
+						<p class="fragment fade-in-then-semi-out">栅栏对象基于条件锁实现，它增加的属性比较多</p>
+					</section>
+
+					<section><h2>什么？想看代码？<span class="fragment">累人，没弄。</span><span class="fragment">想看，私聊我吧。</span></h2></section>
+				</section>
+
+				<!-- page7 -->
+				<section>
+					<section><h2>线程拥有独立私有数据 - ThreadLocal机制是怎么实现的？</h2></section>
+					<section>
+						<p>先简单使用一下</p>
+						<pre><code data-trim data-noescape class="python text-3xl leading-normal">
+							import threading
+
+							local_v = threading.local() # 全局ThreadLocal
+
+							def get_name():
+								name = local_v.name # 从ThreadLocal中取出当前线程相应的内容
+								print(f'Hello, {name}')
+
+							def my_thread(name):
+								local_v.name =name # 存入ThreadLocal中
+								get_name()
+
+							t1 = threading.Thread(target= my_thread, args=('OneOne',), name='Thread-A')
+							t2 = threading.Thread(target= my_thread, args=('TwoTwo',), name='Thread-B')
+							t1.start()
+							t2.start()
+						</code></pre>
+					</section>
+					<section>
+						<p>ThreadLocal其实有两套实现，默认使用基于C的实现</p>
+						<pre><code data-trim data-noescape class="cpp text-3xl leading-normal">
+							try:
+							    from _thread import _local as local # ThreadLocal C实现
+							except ImportError:
+							    from _threading_local import local # ThreadLocal Python实现
+						</code></pre>
+						<span class="fragment">这里看Python的实现。</span><span class="fragment">因为简单，而且两者思想是一样的。</span></p>
+					</section>
+					<section>
+						<p>从local类看起</p>
+						<pre><code data-trim data-noescape class="python text-3xl leading-normal">
+							# Lib/_threading_local.py
+
+							class local:
+								__slots__ = '_local__impl', '__dict__'
+								
+								def __new__(cls, *args, **kw):
+									if (args or kw) and (cls.__init__ is object.__init__):
+										raise TypeError("Initialization arguments are not supported")
+									self = object.__new__(cls)
+									impl = _localimpl() # 创建管理当前线程字典的类
+									impl.localargs = (args, kw)
+									impl.locallock = RLock() # 创建可重入锁
+									# 设置属性
+									object.__setattr__(self, '_local__impl', impl)
+									impl.create_dict()
+									return self
+						</code></pre>
+					</section>
+					<section>
+						<p>ThreadLocal核心逻辑的关键在于_localimpl类</p>
+						<pre><code data-trim data-noescape class="python text-3xl leading-normal">
+							# Lib/_threading_local.py
+
+							class _localimpl:
+								"""A class managing thread-local dicts 管理局部线程字典的类"""
+								__slots__ = 'key', 'dicts', 'localargs', 'locallock', '__weakref__'
+
+								def __init__(self):
+									# str(id(self)) 作为 字典的可以， 可以避免冲突
+									self.key = '_threading_local._localimpl.' + str(id(self))
+									# { id(Thread) -> (ref(Thread), thread-local dict) }
+									# 通过id去找到 ref(Thread)[Thread的弱引用]与线程thread-local字典
+									self.dicts = {}
+
+								def get_dict(self):
+									"""Return the dict for the current thread. Raises KeyError if none
+									defined."""
+									thread = current_thread() # 获得当前线程
+									# id(当前线程) -> 获得其字典中存储的值
+									return self.dicts[id(thread)][1] # 获得当前线程的局部变量字典
+						</code></pre>
+					</section>
+					<section>
+						<p>Python获得当前线程的原理是？</p>
+						<pre><code data-trim data-noescape class="python text-3xl leading-normal">
+							# Lib/threading.py
+
+							def current_thread():
+								try:
+									return _active[get_ident()]
+								except KeyError:
+									return _DummyThread()
+						</code></pre>
+					</section>
+					<section>
+						<p>get_ident()方法由C语言实现，代码在Modules/_threadmodule.c文件中</p>
+						<pre><code data-trim data-noescape class="python text-3xl leading-normal">
+							// Modules/_threadmodule.c
+
+							// 获得当前线程的ID
+							static PyObject *
+							thread_get_ident(PyObject *self, PyObject *Py_UNUSED(ignored))
+							{
+								unsigned long ident = PyThread_get_thread_ident(); // pthread_self() POSIX
+								if (ident == PYTHREAD_INVALID_THREAD_ID) {
+									PyErr_SetString(ThreadError, "no current thread ident");
+									return NULL;
+								}
+								return PyLong_FromUnsignedLong(ident);
+							}
+						</code></pre>
+					</section>
+					<section>
+						<p>继续阅读_localimpl类代码，create_dict()方法用于创建用于存储当前线程数据的字典</p>
+						<pre><code data-trim data-noescape class="python text-3xl leading-normal">
+							# Lib/_threading_local.py/_localimpl
+
+							def create_dict(self):
+								"""为当成线程创建一个新的字典并将其返回"""
+								localdict = {} # 线程局部变量字典
+								key = self.key
+								thread = current_thread()
+								idt = id(thread)
+								def local_deleted(_, key=key):
+									# 删除 localimpl 后，会删除线程属性。
+									thread = wrthread()
+									if thread is not None:
+										del thread.__dict__[key]
+								def thread_deleted(_, idt=idt):
+									local = wrlocal()
+									if local is not None:
+										dct = local.dicts.pop(idt) # 删除对应线程的内容
+								# ref()创建弱引用
+								wrlocal = ref(self, local_deleted)
+								wrthread = ref(thread, thread_deleted)
+								thread.__dict__[key] = wrlocal
+								# 添加到总的字典中
+								self.dicts[idt] = wrthread, localdict
+								return localdict
+						</code></pre>
+					</section>
+					<section>
+						<h2><b>Werkzeug库实现了与ThreadLocal类似的功能，但其支持协程</b></h2>
+						<p class="fragment fade-in-then-semi-out">感兴趣？</p><span class="fragment">看「懒编程」Flask源码剖析系列文章吧</span>
+					</section>
+				</section>
+
+				<!-- page8 -->
+				<section>
+					<section><h2><b></b>鸡肋的Python线程？</b></h2></section>
+					<section>
+						<h2>简单对比一下Java多线程与Python多线程差异</h2>
+						<img width="80%" data-src="img/python多线程.jpg" alt="python多线程">
+						<img width="80%" data-src="img/java多线程.jpg" alt="java多线程">
+					</section>
+					<section>
+						<h2>GIL(Global Interpreter Lock，全局解释器锁)</h2>
+						<p class="fragment fade-in-then-semi-out">在CPython中，每一个Python线程执行前都需要去获得GIL锁，获得该锁的线程才可以执行</p>
+						<p class="fragment fade-in-then-semi-out">这就造成了，在Python中使用多线程，但同一时刻下依旧只有一个线程在运行。</p>
+					</section>
+					<section>
+						<h2><b>GIL有这么大的影响，为何还要使用？为何不将其修改了？</b></h2>
+						<p class="fragment fade-in-then-semi-out">GIL的出现是为了方便CPython的开发，统一的大锁让CPython开发难度降低</p>
+						<p class="fragment fade-in-then-semi-out">至于废弃GIL，1999年的时候就有人（Greg Stein和Mark Hammond）基于Python1.5，去除GIL，提供更细粒度的锁，而不需要锁住整个解释器</p>
+						<p class="fragment fade-in-then-semi-out">但结果令人失望，去除GIL后的Python因为依赖与更多细粒度的锁，其运行效率只有原版Python效率的一半左右</p>
+						<p class="fragment fade-in-then-semi-out">除此之外，失去GIL保护后，Cpython解释器编写以及其他模块编写变得困难，要时刻注意是否产生线程安全问题</p>
+					</section>
+				</section>
+
+				<!-- page9 -->
+				<section>
+					<section>
+						<h2><b>GIL本身一直被优化</b></h2>
+						<p class="fragment fade-in-then-semi-out">在Python3.2中对GIL进行重要的改进，改进后的GIL相比于Python2.x中旧版GIL会让线程对GIL的竞争更加平稳，效率会更高</p>
+						<div class="fragment fade-in-then-semi-out"><img width="80%" data-src="img/新旧GIL性能对比.png" alt="新旧GIL性能对比"></div>
+					</section>
+					<section>
+						<img width="80%" data-src="img/旧GIL性能浪费.png" alt="旧GIL性能浪费">
+					</section>
+					<section>
+						<p>Python2.7上旧的GIL与Python3.8上新的GIL运行效率的差别</p>
+						<pre><code data-trim data-noescape class="cpp text-3xl leading-normal">
+							def count(n):
+								while n > 0:
+									n -= 1
+
+							start = time.time()
+							count(100000000)
+							count(100000000)
+							print(f'顺序执行:{time.time() - start}')
+							
+							start = time.time()
+							t1 = Thread(target=count,args=(100000000,))
+							t2 = Thread(target=count,args=(100000000,))
+							t1.start()
+							t2.start()
+							t1.join()
+							t2.join()
+							print(f'多线程执行:{time.time() - start}')
+						</code></pre>
+					</section>
+					<section>
+						<pre><code data-trim data-noescape class="cpp text-3xl leading-normal">
+							# Python2.7运行结果
+							顺序执行:26.518435955047607
+							多线程执行:38.5986328125
+
+							# Python3.8运行结果
+							顺序执行:9.799257040023804
+							多线程执行:10.256993055343628
+						</code></pre>
+						<p>Python2.7下多线程执行耗时几乎是顺序执行的1.5倍，而Python3.8下，两者差异微小。</p>
+					</section>
+					<section>
+						<h2><b>需要注意</b></h2>
+						<p>决定线程是否释放GIL并不取决于时间，而是取决于gil_drop_request全局变量</p>
+						<p>如果gil_drop_request=0，则线程会在解释器中一直运行，直到gil_drop_request=1，此时线程才会释放GIL</p>
+					</section>
+				</section>
+
+				<!-- page10 -->
+				<section>
+					<section>
+						<h2><b>GIL等待时间与gil_drop_request全局变量的关系？</b></h2>
+					</section>
+					<section>
+						<h2><b>下面进入看图说话环节</b></h2>
+					</section>
+					<section>
+						<img width="80%" data-src="img/thread1.png" alt="thread1">
+					</section>
+					<section>
+						<img width="80%" data-src="img/thread2.png" alt="thread2">
+					</section>
+					<section>
+						<img width="80%" data-src="img/thread3.png" alt="thread3">
+					</section>
+					<section>
+						<img width="80%" data-src="img/thread4.png" alt="thread4">
+					</section>
+					<section>
+						<img width="80%" data-src="img/thread5.png" alt="thread5">
+					</section>
+					<section>
+						<img width="80%" data-src="img/thread6.png" alt="thread6">
+					</section>
+				</section>
+				
+				<section>
+					<section data-background-video="img/wtf.mp4">
+						<h2><b>Python线程与GIL源码探究</b></h2>
+					</section>
+					<section>
+						<p>线程最基本的用法</p>
+						<pre><code data-trim data-noescape class="python text-3xl leading-normal">
+							t1 = threading.Thread(target= my_thread)
+							t1.start()
+						</code></pre>
+					</section>
+					<section>
+						<pre><code data-trim data-noescape class="python text-3xl leading-normal">
+							# Lib/threading.py
+
+							def start(self):
+							if not self._initialized:
+								raise RuntimeError("thread.__init__() not called")
+
+							if self._started.is_set():
+								raise RuntimeError("threads can only be started once")
+							with _active_limbo_lock:
+								_limbo[self] = self
+							try:
+									# 启动线程
+								_start_new_thread(self._bootstrap, ()) 
+							except Exception:
+								with _active_limbo_lock:
+									del _limbo[self]
+								raise
+							self._started.wait()
+						</code></pre>
+						<p>start()方法将_bootstrap结构作为参数传递给_start_new_thread()方法，通过该方法启动线程</p>
+					</section>
+					<section>
+						<p>Python中的线程其实依托于操作系统的线程，不同的操作系统其创建与使用方式不同</p>
+						<pre><code data-trim data-noescape class="cpp text-3xl leading-normal">
+							// Python/thread.c
+
+							// python thread在不同系统中使用不同的系统线程实现。
+							// 类Unix系统
+							#if defined(_POSIX_THREADS)
+							#   define PYTHREAD_NAME "pthread"
+							#   include "thread_pthread.h" // 类Unix平台相关
+							// Windows
+							#elif defined(NT_THREADS)
+							#   define PYTHREAD_NAME "nt"
+							#   include "thread_nt.h" // windows平台相关
+							#else
+							#   error "Require native threads. See https://bugs.python.org/issue31370"
+							#endif
+						</code></pre>
+					</section>
+					<section>
+						<p>_thread.start_new_thread方法在C中对应的方法为thread_PyThread_start_new_thread()</p>
+					</section>
+					<section>
+						<p>thread_PyThread_start_new_thread()方法主要做3个重要的动作</p>
+						<p class="fragment fade-in-then-semi-out">1.创建并初始化bootstate结构boot并将关于线程一切信息都存入该结构中</p>
+						<p class="fragment fade-in-then-semi-out">2.通过PyEval_InitThreads()方法初始化Python多线程环境</p>
+						<p class="fragment fade-in-then-semi-out">3.通过PyThread_start_new_thread()方法创建操作系统的原生线程，传入参数为t_bootstrap()方法与bootstate结构</p>
+					</section>
+					<section>
+						<p>thread_PyThread_start_new_thread()代码如下</p>
+						<pre><code data-trim data-noescape class="cpp text-3xl leading-normal">
+							static PyObject *
+							thread_PyThread_start_new_thread(PyObject *self, PyObject *fargs)
+							{
+								PyObject *func, *args, *keyw = NULL;
+								struct bootstate *boot;
+								unsigned long ident;
+								
+								// ... 省略部分代码
+								
+								// 创建并初始化boostate结构boot，bootstate结构会保存关于线程的一切信息
+								boot = PyMem_NEW(struct bootstate, 1);
+								if (boot == NULL)
+									return PyErr_NoMemory();
+								boot->interp = _PyInterpreterState_Get();
+								boot->func = func;
+								boot->args = args;
+								boot->keyw = keyw;
+								boot->tstate = _PyThreadState_Prealloc(boot->interp);
+								if (boot->tstate == NULL) {
+									PyMem_DEL(boot);
+									return PyErr_NoMemory();
+								}
+								Py_INCREF(func);
+								Py_INCREF(args);
+								Py_XINCREF(keyw);
+								// 初始化多线程环境，解释器默认不初始化，只有用户使用时，才初始化。
+								PyEval_InitThreads(); /* Start the interpreter's thread-awareness */
+								// 创建线程
+								ident = PyThread_start_new_thread(t_bootstrap, (void*) boot);
+								if (ident == PYTHREAD_INVALID_THREAD_ID) {
+									PyErr_SetString(ThreadError, "can't start new thread");
+									Py_DECREF(func);
+									Py_DECREF(args);
+									Py_XDECREF(keyw);
+									PyThreadState_Clear(boot->tstate);
+									PyMem_DEL(boot);
+									return NULL;
+								}
+								// 返回线程id
+								return PyLong_FromUnsignedLong(ident);
+							}
+						</code></pre>
+					</section>
+					<section>
+						<h2><b>分别看一下3个重要动作对应方法背后的原理</b></h2>
+					</section>
+					<section>
+						<b>PyEval_InitThreads初始化Python多线程</b>
+						<p class="fragment fade-in-then-semi-out">gil_created() 判断gil是否被创建过，避免重复创建</p>
+						<p class="fragment fade-in-then-semi-out">create_gil(gil)创建gil</p>
+						<p class="fragment fade-in-then-semi-out">take_gil(gil)持有gil</p>
+						<p class="fragment fade-in-then-semi-out">PyThread_allocate_lock()分配锁</p>
+					</section>
+					<section>
+						<p>
+							create_gil()方法里调用pthread_mutex_init()方法与pthread_cond_init()方法
+						</p>
+						<p>
+							完成了互斥锁的创建与条件变量的初始化，并通过后面的逻辑改变了&gil->locked中的值，从而完成GIL的创建。
+						</p>
+						<p class="fragment fade-in-then-semi-out">两个方法为pthread.h中的方法</p>
+					</section>
+					<section><h2><b>代码？</b><span class="fragment">给你给你。</span></h2></section>
+					<section>
+						<p>create_gil()代码</p>
+						<pre><code data-trim data-noescape class="cpp text-3xl leading-normal">
+							// Python/ceval_gil.h
+
+							// 创建GIL
+							static void create_gil(struct _gil_runtime_state *gil)
+							{
+								// 创建默认的互斥锁 pthread_mutex_init(&gil_mutex, NULL)
+								MUTEX_INIT(gil->mutex);
+							#ifdef FORCE_SWITCHING
+								MUTEX_INIT(gil->switch_mutex);
+							#endif
+								// 初始化条件变量 pthread_cond_init(&gil_cond, NULL)
+								COND_INIT(gil->cond);
+							#ifdef FORCE_SWITCHING
+								COND_INIT(gil->switch_cond);
+							#endif
+								_Py_atomic_store_relaxed(&gil->last_holder, 0);
+								_Py_ANNOTATE_RWLOCK_CREATE(&gil->locked);
+								_Py_atomic_store_explicit(&gil->locked, 0, _Py_memory_order_release);
+							}
+
+							#define MUTEX_INIT(mut) \
+								if (PyMUTEX_INIT(&(mut))) { \
+									Py_FatalError("PyMUTEX_INIT(" #mut ") failed"); };
+									
+							#define COND_INIT(cond) \
+								if (PyCOND_INIT(&(cond))) { \
+									Py_FatalError("PyCOND_INIT(" #cond ") failed"); };
+									
+
+							//  Python/condvar.h
+							#define PyMUTEX_INIT(mut)       pthread_mutex_init((mut), NULL)
+
+							#define PyCOND_INIT(cond)       _PyThread_cond_init(cond)
+
+							// Python/thread_pthread.h
+							int
+							_PyThread_cond_init(PyCOND_T *cond)
+							{
+								return pthread_cond_init(cond, condattr_monotonic);
+							}
+						</code></pre>
+					</section>
+					<section>
+						<p>take_gil()代码</p>
+						<pre><code data-trim data-noescape class="cpp text-3xl leading-normal">
+							// Python/ceval_gil.h
+
+							static void
+							take_gil(struct _ceval_runtime_state *ceval, PyThreadState *tstate)
+							{
+								// ... 省略
+								// 加锁
+								MUTEX_LOCK(gil->mutex);
+
+								if (!_Py_atomic_load_relaxed(&gil->locked)) {
+									// 如果GIL已经释放，直接获取并跳转到_ready
+									goto _ready;
+								}
+
+								// GIL未释放
+								while (_Py_atomic_load_relaxed(&gil->locked)) {
+									int timed_out = 0;
+									unsigned long saved_switchnum;
+									// 记录切换次数
+									saved_switchnum = gil->switch_number;
+									unsigned long interval = (gil->interval >= 1 ? gil->interval : 1);
+									// 超时等待，COND_TIMED_WAIT()在Linux平台，最终会调用pthread_cond_timedwait()方法实现超时等待。
+									COND_TIMED_WAIT(gil->cond, gil->mutex, interval, timed_out);
+
+									// 等待超时，GIL仍未释放，发送释放请求信号
+									if (timed_out &&
+										_Py_atomic_load_relaxed(&gil->locked) &&
+										gil->switch_number == saved_switchnum)
+									{
+										// 设置 gil_drop_request=1，eval_breaker=1
+										SET_GIL_DROP_REQUEST(ceval);
+									}
+								}
+						</code></pre>
+					</section>
+					<section>
+						<b style="font-size: 80px;">总结一下take_gil()方法</b>
+						<p class="fragment fade-in-then-semi-out">如果GIL被占用，则进入等待状态，通过COND_TIMED_WAIT()方法进行等待，该方法在Linux平台下，本质是调用pthread_cond_timedwait()方法实现超时等待</p>
+						<p class="fragment fade-in-then-semi-out">如果等待超时，则调用SET_GIL_DROP_REQUEST()方法将gil_drop_request、eval_breaker这两个变量置1</p>
+					</section>
+					<section>
+						<p>如果GIL没有被占用，则goto跳转到_ready处</p>
+						<pre><code data-trim data-noescape class="cpp text-3xl leading-normal">
+							// Python/ceval_gil.h
+
+							_ready:
+							// ... 省略部分代码
+
+								if (_Py_atomic_load_relaxed(&ceval->gil_drop_request)) {
+									// 重置 gil_drop_request=0
+									RESET_GIL_DROP_REQUEST(ceval);
+								}
+								if (tstate->async_exc != NULL) {
+									_PyEval_SignalAsyncExc(ceval);
+								}
+								// 释放GIL
+								MUTEX_UNLOCK(gil->mutex);
+								errno = err;
+							}
+						</code></pre>
+						<p class="fragment fade-in-then-semi-out">_ready处的代码简单而言，竞争获取到GIL后，重置gil_drop_request</p>
+					</section>
+					<section>
+						<p>初始化多线程环境的PyEval_InitThreads()方法就分析完毕</p>
+						<p class="fragment fade-in-then-semi-out">接着看PyThread_start_new_thread()方法</p>
+					</section>
+					<section>
+						<pre><code data-trim data-noescape class="cpp text-3xl leading-normal">
+							// Python/thread_pthread.h
+
+							unsigned long
+							PyThread_start_new_thread(void (*func)(void *), void *arg)
+							{
+								pthread_t th; // 创建线程对象
+
+								// ... 省略部分代码
+								
+								// 创建线程 (POSIX)
+								status = pthread_create(&th,
+							#if defined(THREAD_STACK_SIZE) || defined(PTHREAD_SYSTEM_SCHED_SUPPORTED)
+														&attrs,
+							#else
+														(pthread_attr_t*)NULL,
+							#endif
+														pythread_wrapper, callback);
+
+								// ... 省略部分代码
+
+								pthread_detach(th); // 将子线程转为detached非阻塞状态
+
+							#if SIZEOF_PTHREAD_T <= SIZEOF_LONG
+								return (unsigned long) th; // 线程 id 存放在 &th。
+							#else
+								return (unsigned long) *(unsigned long *) &th;
+							#endif
+							}
+
+
+							typedef struct {
+								void (*func) (void *);
+								void *arg;
+							} pythread_callback;
+
+							static void *
+							pythread_wrapper(void *arg)
+							{
+								pythread_callback *callback = arg;
+								void (*func)(void *) = callback->func; // t_bootstrap()方法
+								void *func_arg = callback->arg;
+								PyMem_RawFree(arg);
+
+								func(func_arg);
+								return NULL;
+							}
+						</code></pre>
+					</section>
+					<section>
+						<p class="fragment fade-in-then-semi-out">PyThread_start_new_thread方法调用phread库中的pthread_create()方法创建新的线程，并调用pthread_detach()方法将其创建线程的状态设置为非阻塞状态，最后返回线程id</p>
+						<p class="fragment fade-in-then-semi-out">调用pthread_create()方法时，传入了pythread_wrapper方法，该方法包裹着t_bootstrap()方法以及该方法相关的参数arg，这个参数就是boostate结构体</p>
+						<div class="fragment fade-in-then-semi-out"><pre><code data-trim data-noescape class="cpp text-3xl leading-normal">
+							struct bootstate {
+								PyInterpreterState *interp;
+								PyObject *func;
+								PyObject *args;
+								PyObject *keyw;
+								PyThreadState *tstate;
+							};
+						</code></pre></div>
+					</section>
+					<section><p style="font-size: 50px;">关键：</p><b style="font-size: 50px;">当pthread_create()创建的线程开始执行时，其实就是执行t_bootstrap(bootstate)</b></section>
+				</section>
+
+				<section>
+					<section><b style="font-size: 80px;">t_bootstrap()方法很关键</b></section>
+					<section>
+						<pre><code data-trim data-noescape class="cpp text-3xl leading-normal">
+							// Modules/_threadmodule.c 
+
+							static void
+							t_bootstrap(void *boot_raw)
+							{
+								struct bootstate *boot = (struct bootstate *) boot_raw;
+								PyThreadState *tstate;
+								PyObject *res;
+
+								tstate = boot->tstate;
+								// 获得当前线程的id
+								tstate->thread_id = PyThread_get_thread_ident(); 
+								_PyThreadState_Init(&_PyRuntime, tstate);
+								// 竞争GIL
+								PyEval_AcquireThread(tstate);
+								tstate->interp->num_threads++; // 线程数加一
+								// 执行相应的用户代码
+								res = PyObject_Call(boot->func, boot->args, boot->keyw);
+								// ... 省略部分代码
+								PyMem_DEL(boot_raw); // 销毁线程
+								tstate->interp->num_threads--; // 线程数减一
+								// 清理线程相关资源
+								PyThreadState_Clear(tstate);
+								PyThreadState_DeleteCurrent();
+								PyThread_exit_thread();
+							}
+						</code></pre>
+					</section>
+					<section>
+						<p class="fragment fade-in-then-semi-out">t_bootstrap()方法，竞争获得GIL后，通过PyObject_Call()方法执行相应的用户代码</p class="fragment fade-in-then-semi-out">
+						<p class="fragment fade-in-then-semi-out">竞争使用了PyEval_AcquireThread()方法，该方法其实就是调用take_gil()方法去获取gil</p>
+						<p class="fragment fade-in-then-semi-out">整体子线程的生命周期都在t_bootstrap()方法中，PyObject_Call()方法一旦之下完成，就会执行线程资源清理的逻辑</p>
+					</section>
+				</section>
+
+				<section style="text-align: left;">
+					<h1>THE END</h1>
+					<p>
+						- <a href="http://hackpython.com">HackPython</a> <br>
+						- <a href="https://github.com/ayuliao">Github</a>
+					</p>
+				</section>
+
+			</div>
+
+		</div>
+
+		<script src="js/reveal.js"></script>
+
+		<script>
+
+			// More info https://github.com/hakimel/reveal.js#configuration
+			Reveal.initialize({
+				controls: true,
+				progress: true,
+				center: true,
+				hash: true,
+
+				transition: 'slide', // none/fade/slide/convex/concave/zoom
+
+				// More info https://github.com/hakimel/reveal.js#dependencies
+				dependencies: [
+					{ src: 'plugin/markdown/marked.js', condition: function() { return !!document.querySelector( '[data-markdown]' ); } },
+					{ src: 'plugin/markdown/markdown.js', condition: function() { return !!document.querySelector( '[data-markdown]' ); } },
+					{ src: 'plugin/highlight/highlight.js', async: true },
+					{ src: 'plugin/search/search.js', async: true },
+					{ src: 'plugin/zoom-js/zoom.js', async: true },
+					{ src: 'plugin/notes/notes.js', async: true }
+				]
+			});
+
+		</script>
+
+	</body>
+</html>
